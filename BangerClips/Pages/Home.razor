@@ -1,0 +1,152 @@
+﻿@page "/"
+@using System.Runtime.InteropServices.JavaScript
+@using FFmpegBlazor
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Home</PageTitle>
+
+<div>
+    <input type="file" accept="video/*" id="video-upload" />
+</div>
+
+<div>
+    @if (displayVideo)
+    {
+        <video @ref="videoRef" width="960" height="540" controls autoplay>
+
+            @if (videoInfo is not null)
+            {
+                <source src="@videoInfo.Url" type="@videoInfo.Type" />
+            }
+
+        </video>
+    }
+</div>
+
+<button @onclick="async () => StartTime = await GetTimestampAsync()">Start</button>
+<input type="text" @bind="StartTime" />
+
+<button @onclick="async () => EndTime = await GetTimestampAsync()">End</button>
+<input type="text" @bind="EndTime" />
+
+<button @onclick="ClipAsync">Clip</button>
+
+<div>@videoBuffer?.Length</div>
+
+<div>
+    @if (newVideoUrl is not null)
+    {
+        <video width="960" height="540" src="@newVideoUrl" controls></video>
+    }
+</div>
+
+@code {
+    IJSObjectReference? module;
+    DotNetObjectReference<Home>? objRef;
+    ElementReference videoUploadRef;
+    ElementReference videoRef;
+
+    bool displayVideo = true;
+    VideoInfo? videoInfo;
+    byte[]? videoBuffer;
+    string? newVideoUrl;
+
+    double StartTime { get; set; }
+    double EndTime { get; set; }
+
+    FFMPEG? ff;
+
+    protected override async Task OnInitializedAsync()
+    {
+        objRef = DotNetObjectReference.Create(this);
+
+        if (FFmpegFactory.Runtime is null)
+        {
+            //FFmpegFactory.Logger += WriteLogs;
+            FFmpegFactory.Progress += ProgressChange;
+        }
+
+        await FFmpegFactory.Init(JS);
+    }
+
+    protected async override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            module = await JS.InvokeAsync<IJSObjectReference>("import", "./Pages/Home.razor.js");
+            await module.InvokeVoidAsync("addHandlers", objRef);
+        }
+    }
+
+    [JSInvokable]
+    public Task SetVideoInfoAsync(string name, string type, string url)
+    {
+        if (displayVideo)
+        {
+            displayVideo = false;
+            StateHasChanged();
+        }
+
+        displayVideo = true;
+        videoInfo = new(name, type, url);
+        StateHasChanged();
+        return Task.CompletedTask;
+    }
+
+    async ValueTask IAsyncDisposable.DisposeAsync()
+    {
+        if (module is not null)
+        {
+            await module.InvokeVoidAsync("removeHandlers", videoUploadRef);
+            await module.DisposeAsync();
+        }
+
+        objRef?.Dispose();
+    }
+
+    async Task<double> GetTimestampAsync()
+    {
+        if (module is null) return 0;
+
+        return await module.InvokeAsync<double>("getCurrentTime", videoRef);
+    }
+
+    async Task<byte[]> GetVideoBufferAsync()
+    {
+        if (module is null) return [];
+
+        return await module.InvokeAsync<byte[]>("getVideoBuffer");
+    }
+
+    async Task ClipAsync()
+    {
+        if (videoInfo is null) return;
+
+        ff = FFmpegFactory.CreateFFmpeg(new FFmpegConfig() { Log = true });
+
+        await ff.Load();
+
+        if (!ff.IsLoaded) return;
+
+        videoBuffer = await GetVideoBufferAsync();
+
+        ff.WriteFile(videoInfo.Name, videoBuffer);
+
+        await ff.Run("-i", videoInfo.Name, "-ss", StartTime.ToString(), "-to", EndTime.ToString(), "output.mp4");
+    }
+
+    async void ProgressChange(Progress m)
+    {
+        if (ff is null) return;
+
+        if (m.Ratio == 1)
+        {
+            var res = await ff.ReadFile("output.mp4");
+            newVideoUrl = FFmpegFactory.CreateURLFromBuffer(res, "output.mp4", "video/mp4");
+            StateHasChanged();
+        }
+    }
+
+    record class VideoInfo(string Name, string Type, string Url);
+}
